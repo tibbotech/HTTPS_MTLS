@@ -1,0 +1,43 @@
+'DEFINES-------------------------------------------------------------
+
+'--- Network (static IP) ---
+const DEVICE_IP   = "192.168.1.218"
+const DEVICE_MASK = "255.255.255.0"
+const DEVICE_GW   = "192.168.1.1"
+
+'--- Server ---
+'The HTTPS server that requires a client certificate (mTLS).
+'SERVER_IP must match the IP in the server's certificate.
+const SERVER_IP   = "192.168.1.70"
+const SERVER_PORT = 4443
+const SERVER_PATH = "/mtls.php"
+
+'--- Certificates ---
+'ROM file loaded by sock.tlsinit(), three DER blocks joined in this order:
+'  1. the certificate used to check the server (here the server's self-signed certificate)
+'  2. the device's own client certificate
+'  3. the device's private key
+'Set to "ca_only.der" (server certificate only) to see the server reject a device
+'that presents no client certificate.
+#define CERT_FILE "mtls_bundle.der"
+
+'--- Socket ---
+'One socket is used, socket number MTLS_SOCK.
+const MTLS_SOCK = 0
+
+'Socket buffer sizes in pages (1 page = 256 bytes).
+'6 pages suits ECDSA P-256 certificates; increase to 8 for RSA 2048.
+#define TLS_RX_BUFF 6
+#define TLS_TX_BUFF 6
+
+'Give up on a request that has not finished within this many on_sys_timer ticks (0.5 s each).
+const REQUEST_TIMEOUT_TICKS = 60
+
+'INCLUDES------------------------------------------------------------
+
+'DECLARATIONS--------------------------------------------------------
+declare sub boot()
+declare sub start_request()
+declare sub end_request(reason as string)
+declare sub mtls_event(newstate as pl_sock_state, newstatesimple as pl_sock_state_simple)
+declare sub mtls_data()

@@ -1,0 +1,140 @@
+include "global.tbh"
+
+enum en_mtls_state
+    MTLS_IDLE,          'ready; press MD to send a request
+    MTLS_CONNECTING,    'TCP connect and TLS handshake in progress
+    MTLS_WAITING        'request sent, receiving the response
+end enum
+
+dim mtls_state as en_mtls_state
+dim req_ticks as byte
+
+'------------------------------------------------------------------------------
+sub on_sys_init()
+    boot()
+end sub
+
+'------------------------------------------------------------------------------
+sub boot()
+    net.ip        = DEVICE_IP
+    net.netmask   = DEVICE_MASK
+    net.gatewayip = DEVICE_GW
+
+    sock.num = MTLS_SOCK
+    sock.rxbuffrq(TLS_RX_BUFF)
+    sock.txbuffrq(TLS_TX_BUFF)
+    sys.buffalloc()
+    sys.debugprint("Buffer pages free after alloc: " + str(sys.freebuffpages) + "\r\n")
+
+    sock.protocol  = PL_SOCK_PROTOCOL_TCP
+    sock.inconmode = PL_SOCK_INCONMODE_NONE
+    sock.reconmode = PL_SOCK_RECONMODE_0
+
+    mtls_state = MTLS_IDLE
+    sys.debugprint("HTTPS_MTLS ready. Press MD to GET https://" + SERVER_IP + ":" + str(SERVER_PORT) + SERVER_PATH + " with client certificate (" + CERT_FILE + ")\r\n")
+end sub
+
+'------------------------------------------------------------------------------
+sub on_button_pressed()
+    if mtls_state = MTLS_IDLE then
+        start_request()
+    else
+        sys.debugprint("MD: request already in progress\r\n")
+    end if
+end sub
+
+'------------------------------------------------------------------------------
+sub on_sys_timer()
+    'Watchdog: abandon a request that has not finished in time
+    if mtls_state = MTLS_IDLE then exit sub
+    req_ticks = req_ticks + 1
+    if req_ticks >= REQUEST_TIMEOUT_TICKS then end_request("timed out")
+end sub
+
+'------------------------------------------------------------------------------
+sub on_sock_event(newstate as pl_sock_state, newstatesimple as pl_sock_state_simple)
+    if sock.num = MTLS_SOCK then mtls_event(newstate, newstatesimple)
+end sub
+
+'------------------------------------------------------------------------------
+sub on_sock_data_arrival()
+    if sock.num = MTLS_SOCK then mtls_data()
+end sub
+
+'==============================================================================
+' Request flow: TCP connect -> mTLS handshake -> GET -> response
+'==============================================================================
+sub start_request()
+    req_ticks  = 0
+    mtls_state = MTLS_CONNECTING
+    sock.num        = MTLS_SOCK
+    sock.targetip   = SERVER_IP
+    sock.targetport = SERVER_PORT
+    sys.debugprint("Connecting to " + SERVER_IP + ":" + str(SERVER_PORT) + "...\r\n")
+    sock.connect
+end sub
+
+'------------------------------------------------------------------------------
+sub end_request(reason as string)
+    sys.debugprint("Request ended: " + reason + "\r\n")
+    sock.num = MTLS_SOCK
+    if sock.statesimple <> PL_SSTS_CLOSED then sock.close
+    mtls_state = MTLS_IDLE
+end sub
+
+'------------------------------------------------------------------------------
+sub mtls_event(newstate as pl_sock_state, newstatesimple as pl_sock_state_simple)
+    if newstatesimple = PL_SSTS_CLOSED then
+        sock.rxclear
+        sock.txclear
+        sock.tlsdeinit
+        if mtls_state = MTLS_WAITING then
+            sys.debugprint("\r\nResponse complete (server closed the connection)\r\n")
+        else if mtls_state = MTLS_CONNECTING then
+            sys.debugprint("Connection closed (state=" + str(newstate) + ")\r\n")
+        end if
+        mtls_state = MTLS_IDLE
+        exit sub
+    end if
+
+    select case newstate
+    case PL_SST_EST_AOPENED:
+        sys.debugprint("TCP connected. Starting TLS with client certificate...\r\n")
+        sock.tlsdeinit
+        romfile.open(CERT_FILE)
+        dim tls_res as pl_tls_result = sock.tlsinit(romfile.offset)
+        if tls_res <> PL_TLS_SUCCESS then
+            end_request("tlsinit FAILED (" + str(tls_res) + ")")
+            exit sub
+        end if
+        tls_res = sock.tlshandshake(SERVER_IP)
+        if tls_res <> PL_TLS_SUCCESS then
+            end_request("tlshandshake FAILED (" + str(tls_res) + ")")
+            exit sub
+        end if
+        sys.debugprint("TLS handshake started...\r\n")
+
+    case PL_SST_EST_TLS:
+        sys.debugprint("mTLS established. Sending GET " + SERVER_PATH + "\r\n")
+        mtls_state = MTLS_WAITING
+        sock.tlssetdata("GET " + SERVER_PATH + " HTTP/1.1" + chr(13) + chr(10) + "Host: " + SERVER_IP + chr(13) + chr(10) + "User-Agent: Tibbo-G3" + chr(13) + chr(10) + "Connection: close" + chr(13) + chr(10) + chr(13) + chr(10))
+        sock.send
+
+    case PL_SST_EST_TLS_FAILED:
+        sys.debugprint("TLS handshake FAILED - resetting\r\n")
+        sock.rxclear
+        sock.reset
+        mtls_state = MTLS_IDLE
+    end select
+end sub
+
+'------------------------------------------------------------------------------
+sub mtls_data()
+    if mtls_state <> MTLS_WAITING then exit sub
+    dim data as string
+    data = sock.tlsgetdata(255)
+    while len(data) > 0
+        sys.debugprint(data)
+        data = sock.tlsgetdata(255)
+    wend
+end sub
